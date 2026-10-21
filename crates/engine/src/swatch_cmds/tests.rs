@@ -205,6 +205,49 @@ fn ase_round_trip_keeps_groups_floats_and_kinds() {
 }
 
 #[test]
+fn gpl_import_reads_a_gimp_palette_and_detects_it_by_its_header() {
+    let mut s = Session::new();
+    let gpl = "GIMP Palette\nName: Sunset\nColumns: 2\n#\n255 128   0\tSunset Orange\n  0  64 255\n";
+    let r = s.execute("swatches.import", json!({"data": b64_encode(gpl.as_bytes()), "group": "Sunset"})).unwrap();
+    assert_eq!((r["format"].as_str(), r["count"].as_u64()), (Some("gpl"), Some(2)));
+    let g = s.presets.swatches.iter().find(|g| g.name == "Sunset").unwrap();
+    assert_eq!(g.items[0].name, "Sunset Orange");
+    assert_eq!(g.items[0].color, SwatchColor::Rgb([1.0, 128.0 / 255.0, 0.0]));
+    assert_eq!(g.items[1].name, "Swatch 2", "an unnamed colour is numbered by its place in the file");
+    // The extension alone is enough when the bytes carry no signature.
+    let headerless = "GIMP Palette\n1 2 3 X\n";
+    assert!(s.execute("swatches.import", json!({"data": b64_encode(headerless.as_bytes()), "format": ".GPL"})).is_ok());
+    // Broken files and absurd formats fail cleanly.
+    for bad in ["GIMP Palette\n", "GIMP Palette\n1 2\n", "GIMP Palette\nred green blue\n"] {
+        assert!(s.execute("swatches.import", json!({"data": b64_encode(bad.as_bytes()), "format": "gpl"})).is_err(), "{bad:?}");
+    }
+}
+
+#[test]
+fn gpl_export_round_trips_rgb_and_leaves_out_inks() {
+    let mut s = Session::new();
+    s.execute("swatches.newGroup", json!({"name": "Mine"})).unwrap();
+    s.execute("swatches.add", json!({"name": "Teal", "color": "#008080", "group": "Mine"})).unwrap();
+    s.execute("swatches.add", json!({"name": "Ink", "color": {"model": "cmyk", "values": [100, 0, 0, 0]}, "group": "Mine"})).unwrap();
+    let r = s.execute("swatches.export", json!({"format": "gpl", "group": "Mine"})).unwrap();
+    assert_eq!(r["count"], 1);
+    assert!(r["warnings"].as_array().is_some_and(|w| w.len() == 1), "the CMYK swatch is reported as left out: {r}");
+    let bytes = b64_decode(r["data"].as_str().unwrap()).unwrap();
+    assert!(bytes.starts_with(b"GIMP Palette\nName: Mine\n"));
+    let back = photocraft_psd::gpl::parse(&bytes).unwrap();
+    assert_eq!((back.colors[0].rgb, back.colors[0].name.as_str()), ([0, 128, 128], "Teal"));
+    // Nothing storable: an error, not an empty file.
+    let mut only_ink = Session::new();
+    only_ink.execute("swatches.reset", json!({})).unwrap();
+    for g in &mut only_ink.presets.swatches {
+        g.items.clear();
+    }
+    only_ink.execute("swatches.newGroup", json!({"name": "Inks"})).unwrap();
+    only_ink.execute("swatches.add", json!({"name": "Ink", "color": {"model": "cmyk", "values": [0, 100, 0, 0]}, "group": "Inks"})).unwrap();
+    assert!(only_ink.execute("swatches.export", json!({"format": "gpl", "group": "Inks"})).is_err());
+}
+
+#[test]
 fn bad_params_fail_gracefully() {
     let mut s = Session::new();
     let before = s.presets.swatches.clone();
@@ -247,7 +290,7 @@ fn bad_params_fail_gracefully() {
         ("swatches.import", json!({"data": b64_encode(b"ASEF\0\x01\0\0\xff\xff\xff\xff")})),
         ("swatches.import", json!({"data": b64_encode(&[0, 1, 0xff, 0xff])})),
         ("swatches.import", json!({"data": b64_encode(&[0, 1, 0, 0])})),
-        ("swatches.import", json!({"data": b64_encode(&[0, 1, 0, 0]), "format": "gpl"})),
+        ("swatches.import", json!({"data": b64_encode(&[0, 1, 0, 0]), "format": "xyz"})),
         ("swatches.import", json!({"data": b64_encode(&[0, 1, 0, 0]), "mode": "merge"})),
         ("swatches.export", json!({"format": "pdf"})),
         ("swatches.export", json!({"group": "Nope"})),

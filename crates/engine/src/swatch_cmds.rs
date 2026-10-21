@@ -1,6 +1,6 @@
 //! Swatches panel commands (`swatches.*`): add, delete, rename, reorder and group swatches, set
 //! the foreground or background colour from one, restore the defaults, and import or export
-//! Photoshop `.aco` and Adobe Swatch Exchange `.ase` files.
+//! Photoshop `.aco`, Adobe Swatch Exchange `.ase` and GIMP palette `.gpl` files.
 //!
 //! The library is [`PresetState::swatches`](crate::presets::PresetState) (model and colour
 //! conversions in [`crate::presets::swatches`]); file parsing is `photocraft_psd::{aco, ase}`.
@@ -363,6 +363,7 @@ fn reset(s: &mut Session, p: &Value) -> Result<Value> {
 pub enum Format {
     Aco,
     Ase,
+    Gpl,
 }
 
 impl Format {
@@ -370,6 +371,7 @@ impl Format {
         match s.trim_start_matches('.').to_ascii_lowercase().as_str() {
             "aco" => Some(Format::Aco),
             "ase" => Some(Format::Ase),
+            "gpl" => Some(Format::Gpl),
             _ => None,
         }
     }
@@ -377,6 +379,7 @@ impl Format {
         match self {
             Format::Aco => "aco",
             Format::Ase => "ase",
+            Format::Gpl => "gpl",
         }
     }
 }
@@ -484,6 +487,16 @@ pub fn read_file(bytes: &[u8], format: Format, group: &str) -> std::result::Resu
                 .collect();
             out.push(Group::new(group, items));
         }
+        Format::Gpl => {
+            let f = photocraft_psd::gpl::parse(bytes).map_err(|e| format!("not a readable .gpl palette file: {e}"))?;
+            let items = f
+                .colors
+                .iter()
+                .enumerate()
+                .map(|(i, c)| Swatch { name: fallback(i, &c.name), color: SwatchColor::Rgb(c.rgb.map(|v| f32::from(v) / 255.0)), kind: SwatchKind::Process })
+                .collect();
+            out.push(Group::new(group, items));
+        }
         Format::Ase => {
             let f = photocraft_psd::ase::parse(bytes).map_err(|e| format!("not a readable .ase swatch file: {e}"))?;
             let mut skipped = 0;
@@ -541,6 +554,42 @@ pub fn write_file(groups: &[Group<Swatch>], format: Format) -> std::result::Resu
             let bytes = photocraft_psd::aco::write(&swatches).map_err(|e| e.to_string())?;
             Ok((bytes, n, warnings))
         }
+        Format::Gpl => {
+            let mut left_out = 0;
+            let colors: Vec<photocraft_psd::gpl::GplColor> = groups
+                .iter()
+                .flat_map(|g| g.items.iter())
+                .filter_map(|s| {
+                    // A .gpl holds RGB only; HSB and gray are exact RGB, an ink or Lab colour needs the
+                    // colour-managed conversion, so it is left out rather than written wrong.
+                    let rgb = match s.color {
+                        SwatchColor::Rgb(v) => v,
+                        SwatchColor::Hsb(v) => hsb_to_rgb(v),
+                        SwatchColor::Gray(k) => [1.0 - unit(k); 3],
+                        SwatchColor::Cmyk(_) | SwatchColor::Lab(_) | SwatchColor::Book { .. } => {
+                            left_out += 1;
+                            return None;
+                        }
+                    };
+                    Some(photocraft_psd::gpl::GplColor { rgb: rgb.map(|v| (unit(v) * 255.0).round() as u8), name: s.name.clone() })
+                })
+                .collect();
+            if groups.len() > 1 {
+                warnings.push(".gpl files have no groups; the swatches were saved as one list".into());
+            }
+            if left_out > 0 {
+                warnings.push(format!("{left_out} CMYK, Lab or colour-book swatches can't be stored in a .gpl file (RGB only) and were left out"));
+            }
+            if colors.is_empty() {
+                return Err("none of the swatches can be stored in a .gpl file (RGB only)".into());
+            }
+            let name = match groups {
+                [g] => g.name.clone(),
+                _ => "Swatches".into(),
+            };
+            let n = colors.len();
+            Ok((photocraft_psd::gpl::write(&photocraft_psd::gpl::GplPalette { name, colors }), n, warnings))
+        }
         Format::Ase => {
             let mut books = 0;
             let mut entries = Vec::with_capacity(groups.len());
@@ -571,12 +620,13 @@ pub fn write_file(groups: &[Group<Swatch>], format: Format) -> std::result::Resu
 
 fn import(s: &mut Session, p: &Value) -> Result<Value> {
     const CMD: &str = "swatches.import";
-    let (bytes, stem) = crate::preset_import_cmds::file_bytes(p, CMD, ".aco or .ase file")?;
+    let (bytes, stem) = crate::preset_import_cmds::file_bytes(p, CMD, ".aco, .ase or .gpl file")?;
     let format = match str_param(p, "format") {
-        Some(f) => Format::parse(f).ok_or_else(|| bad(CMD, format!("unknown format `{f}` (aco|ase)")))?,
+        Some(f) => Format::parse(f).ok_or_else(|| bad(CMD, format!("unknown format `{f}` (aco|ase|gpl)")))?,
         None if bytes.starts_with(photocraft_psd::ase::SIGNATURE) => Format::Ase,
+        None if bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&bytes).starts_with(photocraft_psd::gpl::SIGNATURE) => Format::Gpl,
         None if matches!(bytes.get(..2), Some([0, 1] | [0, 2])) => Format::Aco,
-        None => ext_format(str_param(p, "path")).ok_or_else(|| bad(CMD, "not an .aco or .ase swatch file"))?,
+        None => ext_format(str_param(p, "path")).ok_or_else(|| bad(CMD, "not an .aco, .ase or .gpl swatch file"))?,
     };
     let mode = str_param(p, "mode").unwrap_or("append");
     let replace = match mode {
@@ -634,7 +684,7 @@ fn export(s: &mut Session, p: &Value) -> Result<Value> {
     const CMD: &str = "swatches.export";
     let path = str_param(p, "path");
     let format = match str_param(p, "format") {
-        Some(f) => Format::parse(f).ok_or_else(|| bad(CMD, format!("unknown format `{f}` (aco|ase)")))?,
+        Some(f) => Format::parse(f).ok_or_else(|| bad(CMD, format!("unknown format `{f}` (aco|ase|gpl)")))?,
         None => ext_format(path).unwrap_or(Format::Aco),
     };
     let mut groups: Vec<Group<Swatch>> = match name_param(p, "group", CMD)? {
@@ -790,7 +840,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Import Swatches…",
             menu: &[],
             shortcut: None,
-            params: r##"{"path":".aco or .ase file"?,"data":base64 bytes?,"format":"aco|ase"? (detected),"mode":"append|replace"="append","group":str?=file name (the group for ungrouped colours)} → {format,mode,groups,count,warnings}"##,
+            params: r##"{"path":".aco, .ase or .gpl file"?,"data":base64 bytes?,"format":"aco|ase|gpl"? (detected),"mode":"append|replace"="append","group":str?=file name (the group for ungrouped colours)} → {format,mode,groups,count,warnings}"##,
             enabled: always,
             run: import,
             journal: true,
@@ -800,7 +850,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Export Swatches…",
             menu: &[],
             shortcut: None,
-            params: r##"{"format":"aco|ase"?=from path, else aco,"path":file? (else the bytes come back as base64 `data`),"group":name? (only that group),"swatches":[names]? (only these)} → {format,count,bytes,warnings,path|data}"##,
+            params: r##"{"format":"aco|ase|gpl"?=from path, else aco,"path":file? (else the bytes come back as base64 `data`),"group":name? (only that group),"swatches":[names]? (only these)} → {format,count,bytes,warnings,path|data}"##,
             enabled: has_swatches,
             run: export,
             journal: true,

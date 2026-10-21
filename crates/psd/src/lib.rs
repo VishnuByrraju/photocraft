@@ -51,6 +51,7 @@ pub mod descriptor;
 pub mod error;
 pub mod file;
 pub mod filter_effects;
+pub mod gpl;
 pub mod grd;
 pub mod hdr;
 pub mod header;
