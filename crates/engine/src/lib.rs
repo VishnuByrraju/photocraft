@@ -31,6 +31,7 @@ pub mod color_to_alpha_cmds;
 pub mod commands;
 pub mod comps_cmds;
 mod crop_fill;
+mod css_cmds;
 pub mod cutout_cmds;
 pub mod display_color;
 pub mod distort_cmds;
