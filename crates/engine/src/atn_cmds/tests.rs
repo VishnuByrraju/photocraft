@@ -1387,3 +1387,21 @@ fn function_keys_keep_shift_and_command() {
     }
     assert_eq!(super::function_key_name(7, false, false), "F7");
 }
+
+/// Transform Selection's four-corner geometry has no field in Photoshop's descriptor: a strict
+/// export refuses it instead of replaying only the scale and move (#7505).
+#[test]
+fn transform_selection_corners_are_not_silently_dropped_by_atn_export() {
+    let corners = json!([[1, 1], [20, 0], [22, 15], [3, 14]]);
+    for params in [json!({"corners": corners, "scaleX": 150}), json!({"quad": corners})] {
+        let distorted = Action { name: "Distort".into(), steps: vec![("select.transformSelection".into(), params)], ..Default::default() };
+        assert!(export("Audit7", &[&distorted], &[], false).is_err());
+        let (_, skipped) = export("Audit7", &[&distorted], &[], true).unwrap();
+        assert_eq!(skipped, vec![Skipped { action: "Distort".into(), step: 0, id: "select.transformSelection".into() }]);
+    }
+    let plain = Action { name: "Plain".into(), steps: vec![("select.transformSelection".into(), json!({"scaleX": 150}))], ..Default::default() };
+    let (bytes, skipped) = export("Audit7", &[&plain], &[], false).unwrap();
+    assert!(skipped.is_empty());
+    let imported = import(&bytes).unwrap();
+    assert_eq!(imported.actions[0].steps, vec![("select.transformSelection".to_string(), json!({"dx": 0, "dy": 0, "scaleX": 150}))]);
+}

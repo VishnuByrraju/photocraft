@@ -1647,7 +1647,9 @@ fn transform_from(d: &Descriptor) -> Mapped {
 }
 
 fn transform_to(id: &str, p: &Value) -> Option<Descriptor> {
-    if p.get("quad").is_some() || p.get("matrix").is_some() || p.get("rect").is_some() {
+    // `corners` is Transform Selection's alias of `quad`; the descriptor holds no four-corner
+    // geometry, so exporting it would replay as the scale and move alone (#7505).
+    if ["quad", "corners", "matrix", "rect"].iter().any(|k| p.get(*k).is_some()) {
         return None;
     }
     let target = match id {
